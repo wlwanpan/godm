@@ -1,6 +1,7 @@
 package godm
 
 import (
+	"context"
 	"os"
 
 	"go.mongodb.org/mongo-driver/mongo"
@@ -25,15 +26,14 @@ type Index struct {
 	Options IndexOpts `yaml:"options"`
 }
 
-func BuildIndexes() error {
+func BuildIndexes(ctx context.Context) error {
 	iml, err := readIndexesFromFile(indexesFilename)
 	if err != nil {
 		return err
 	}
 
 	parsedIndexes := parseIndexesToMgoIndexes(iml)
-	createIndexes(parsedIndexes)
-	return nil
+	return createIndexes(ctx, parsedIndexes)
 }
 
 func parseIndexesToMgoIndexes(iml indexesMapList) map[string][]mongo.IndexModel {

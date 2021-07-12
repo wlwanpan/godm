@@ -4,12 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
 	"net/url"
-	"os"
 	"sync"
-	"time"
 
+	"github.com/hashicorp/go-multierror"
 	"go.mongodb.org/mongo-driver/mongo"
 	mgoOptions "go.mongodb.org/mongo-driver/mongo/options"
 	"gopkg.in/mgo.v2/bson"
@@ -64,47 +62,35 @@ func (c *Client) disconnect(ctx context.Context) error {
 	return c.mgoClient.Disconnect(ctx)
 }
 
-func (c *Client) isOnline() bool {
+func (c *Client) isOnline() (bool, error) {
 	db := c.mgoDb()
 	statusCmd := bson.M{"serverStatus": "1"}
 	result := db.RunCommand(nil, statusCmd)
-	if result.Err() != nil {
-		log.Printf("Error fetching server status: %s", result.Err().Error())
-		return false
+	if err := result.Err(); err != nil {
+		return false, err
 	}
 
 	var data map[string]interface{}
 	result.Decode(&data)
 	status, ok := data["ok"]
 	if ok && status.(float64) == 1 {
-		return true
+		return true, nil
 	}
-	return false
+	return false, nil
 }
 
-func Init() error {
+func Init(usr, pwd string) error {
 	if client != nil {
 		return ErrDbClientAlreadyInit
 	}
 	var opts *mgoOptions.ClientOptions
 	var err error
-	dbUsr, dbPwd := os.Getenv("DB_USERNAME"), os.Getenv("DB_PASSWORD")
 
-	if os.Getenv("LOCAL_DB") == "1" {
-		log.Println("Connecting to LOCAL mongodb.")
-		opts = mgoOptions.Client().ApplyURI(localMongoURL)
-	} else if dbUsr == "" || dbPwd == "" {
-		return ErrDbEnvVariables
-	} else {
-		log.Println("Connecting to HOSTED mongodb.")
-		opts, err = clientOptions(dbUsr, dbPwd)
-	}
-
+	opts, err = clientOptions(usr, pwd)
 	if err != nil {
 		return err
 	}
 
-	log.Println("initializing mgo client: ", opts.GetURI())
 	c, err := mongo.NewClient(opts)
 	if err != nil {
 		return err
@@ -121,7 +107,7 @@ func Connect(ctx context.Context) error {
 	if err := client.connect(ctx); err != nil {
 		return err
 	}
-	if !client.isOnline() {
+	if ok, _ := client.isOnline(); !ok {
 		return ErrDbStatusCheckFailed
 	}
 	return nil
@@ -153,10 +139,9 @@ func clientOptions(usr, pwd string) (*mgoOptions.ClientOptions, error) {
 	return mgoOptions.Client().ApplyURI(uri.String()), nil
 }
 
-func createIndexes(indexes map[string][]mongo.IndexModel) {
+func createIndexes(ctx context.Context, indexes map[string][]mongo.IndexModel) error {
 	wg := sync.WaitGroup{}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-	defer cancel()
+	errs := &multierror.Error{}
 
 	for collectionName, collectionIndexes := range indexes {
 		wg.Add(1)
@@ -164,14 +149,12 @@ func createIndexes(indexes map[string][]mongo.IndexModel) {
 			col := client.mgoCollection(c)
 			_, err := col.Indexes().CreateMany(ctx, i)
 			if err != nil {
-				log.Printf("db client: error creating indexes for %s", c)
-				log.Println(err)
-			} else {
-				log.Printf("db client: successfully created indexes for %s", c)
+				multierror.Append(errs, err)
 			}
 			wg.Done()
 		}(collectionName, collectionIndexes)
 	}
 
 	wg.Wait()
+	return errs
 }
